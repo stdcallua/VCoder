@@ -1,0 +1,234 @@
+
+#define VDISKSIZE 1952  // размер пространства выделенного под виртуальный диск
+
+eeprom unsigned char notUsed; // нулевой байт EEPROM
+
+eeprom unsigned char E_ClusterSize; // размер кластера файловой системы в EEPROM
+eeprom unsigned char VDISK[VDISKSIZE]; // массив для хранения моделей
+
+eeprom unsigned char files[16]; // массив указателей на файлы
+eeprom unsigned char freesp; // указатель на первый свободный кластер
+
+unsigned int  cluster; // номер кластера для чтения
+unsigned int   cl_pos; // позиция для чтения в кластере
+unsigned char fileNum; // номер файла для операций
+
+unsigned char F_STATUS; // барьерная переменная сигнализирующая о наличии ошибки при совершении прошлой операции
+
+/**
+                             Ф О Р М А Т И Р О В А Н И Е    V - D I S K
+                             
+ Процедура форматирует виртуальный диск исходя из его размера и размера кластера 
+ все файлы уничтожаются
+**/
+void formatVDisk() {
+unsigned int i; // переменная цикла
+  if ( (E_ClusterSize==16) || (E_ClusterSize==32) || (E_ClusterSize==48) || (E_ClusterSize==64) ) {
+    // перебираем все кластеры последовательно
+     for(i=0;i<(VDISKSIZE/E_ClusterSize);i++) {
+        if (i!=((VDISKSIZE/E_ClusterSize)-1)) VDISK[i*E_ClusterSize]=i+1; else VDISK[i*E_ClusterSize]=255;
+     }
+  
+     for  (i=0; i<16; i++) files[i]=255; // обнуляем все объявления файлов
+  
+     freesp=0; // свободное пространство показывает на нулевой кластер
+  } 
+    else {
+           // выдаем пользователю об этом предупреждение
+            messStr1="  INCORRECT CLUTER SIZE  "; 
+            messStr2="CLUSTER SIZE SET TO 32   ";
+            messStr3=" CHECK NEW VALUE IN MENU:";
+            messStr4=" SYSTEM - V-DISK";
+            messStr5=" AND TRY AGAIN.. ";
+            E_ClusterSize=32;
+    } 
+}
+
+/**
+                        О Т К Р Ы Т И Е   Ф А Й Л А   Д Л Я   Ч Т Е Н И Я
+                        
+открытие файла по его номеру. номера файлов в диапазоне 0..15
+
+возвращаемые коды:
+00 - нет ошибки, файл открыт
+01 - не верный номер файла
+02 - файл не существует
+**/
+unsigned char fileToRead(unsigned char filenum) {
+unsigned char retcode;
+
+F_STATUS=1; // регистрируем барьер ошибки
+
+if (filenum>15) retcode=1; // если номер файла более 15 то выходим из процедуры
+  else {
+
+     if (files[filenum]==255) { // файл не существует
+       retcode=2; } 
+         else {
+           fileNum=filenum;
+           cluster=files[filenum]; // запоминаем номер первого кластера файла
+           cl_pos=1; // позиция для чтения в кластере
+           retcode=0;
+           F_STATUS=0; // сбрасываем барьер ошибки
+         }  
+  }
+  
+return retcode;   
+}
+
+/**
+                         Ч Т Е Н И Е   Б А Й Т А   И З   Ф А Й Л А 
+**/
+unsigned char fileRead() {
+unsigned char readc; // прочитанный байт файла
+
+  readc=0; // первоначальное значение
+  
+  if (F_STATUS==0) {
+
+    readc=VDISK[cluster*E_ClusterSize+cl_pos]; // считываем байт
+
+    cl_pos++; // переходим к следующему байту
+    if (cl_pos==E_ClusterSize) { // перейти к следующему кластеру файла
+      cl_pos=1;
+      cluster=VDISK[cluster*E_ClusterSize]; // читаем номер следующего кластера
+      if (cluster==255) { // больше кластеров в файле нет 
+         F_STATUS=1; // регистрируем ошибку
+      }
+    } 
+  }
+  return readc; // возвращаем считанный байт
+}
+
+/**
+                         О Т К Р Ы Т И Е   Ф А Й Л А   Д Л Я   З А П И С И
+
+Процедура открывает запись последовательную запись файла  с номером в диапазоне 0..15
+возвращаемые коды:
+00 - файл готов к записи
+01 - номер файла неверен
+02 - нет свободного пространства для записи (продолжения записи)
+**/
+unsigned char fileToWrite(unsigned char filenum) {
+unsigned char retcode;
+
+F_STATUS=1; // регистрируем барьер ошибки
+
+   if (filenum>15) 
+      retcode=1; // если номер файла более 15 то выходим из процедуры
+      else {
+          if (freesp!=255) { // если freesp<255 - значит свободный кластер есть 
+
+             files[filenum]=freesp; // первый свободный кластер - теперь для открываемого на запись файла
+
+             cluster=freesp; // запоминаем номер первого кластера файла
+
+             // свободный кластер - следующий кластер за freesp
+             freesp=VDISK[((unsigned int)freesp)*((unsigned int)E_ClusterSize)]; 
+
+             // в файле пока только текущий кластер, следующего нет
+             VDISK[((unsigned int)cluster)*((unsigned int)E_ClusterSize)]=255; 
+                      
+             fileNum=filenum;
+             cl_pos=1; // позиция для записи в кластере
+             retcode=0;
+             F_STATUS=0; // сбрасываем барьер ошибки 
+          }
+            else retcode=2;         
+      }    
+return retcode;   
+}
+
+/**
+                               П Р О Ц Е Д У Р А   У Д А Л Е Н И Я    Ф А Й Л А    
+**/
+void fileDelete(unsigned char filenum) {
+unsigned char i; // временная переменая
+  if (files[filenum]!=255) { // если файл еще не удален
+     // ищем последний кластер свободного пространства
+     i=freesp; // берем первый свободный сектор
+     if (i!=255) {
+         while (VDISK[((unsigned int)i)*((unsigned int)E_ClusterSize)]!=255) { // если сектор не последний...
+           i=VDISK[((unsigned int)i)*((unsigned int)E_ClusterSize)];  // берем из него указатель на следующий
+         }
+        // в i номер последнего кластера свободного пространства
+        VDISK[((unsigned int)i)*((unsigned int)E_ClusterSize)]=files[filenum]; /** добавляем к этому пространству
+                                               цепочку секторов нашего файла **/
+     } else freesp=files[filenum];
+        files[filenum]=255; // ставим метку отсутствия файла
+
+        if (printMess==0) {
+           // выдаем пользователю об этом предупреждение
+            messStr2=""; 
+            messStr1="      FILE ERASED !      ";
+            messStr3=" ";
+            messStr4=" ";
+            messStr5=" ";
+            printMess=1;
+        }                   
+  } 
+}
+
+/**
+                   З А П И С Ь   Б А Й Т А   В   Ф А Й Л   ( П О С Л Е Д О В А Т Е Л Ь Н А Я)
+Процедура последовательной записи в файл
+                   
+**/
+void fileWrite(unsigned char wrChar) {
+
+   if (F_STATUS==0) { // если ошибок от предыдущей операции небыло...
+
+      if (VDISK[cluster*E_ClusterSize+cl_pos]!=wrChar) // нужно ли записывать байт (может быть он 
+                                                         // уже такой как  нам нужно 
+          VDISK[cluster*E_ClusterSize+cl_pos]=wrChar;  // записываем байт
+
+      cl_pos++; // переходим к следующему байту
+
+      if (cl_pos==E_ClusterSize) { // текущий кластер закончился - нужно открыть для записи следующий
+
+          cl_pos=1; // позиция в новом кластере 
+
+          if (freesp!=255) { // если есть еще свободные кластеры...
+         
+               VDISK[((unsigned int)cluster)*((unsigned int)E_ClusterSize)]=freesp; // следующий кластер будет 
+                                 // первым из свободных
+                                 
+               cluster=freesp; // следующий кластер для записи
+               // читаем номер следующего свободного 
+               freesp=VDISK[((unsigned int)cluster)*((unsigned int)E_ClusterSize)]; 
+               // делаем кластер последним для файла
+               VDISK[((unsigned int)cluster)*((unsigned int)E_ClusterSize)]=255;  
+          } 
+               else { // больше свободных кластеров нет 
+                   F_STATUS=1; // регистрируем ошибку
+                   // выдаем пользователю об этом предупреждение
+                   messStr1="    FILE WRITE ERROR !   ";
+
+                   messStr2=" No free space for task  ";
+                   messStr3="    File NOT SAVED";
+                   messStr4=" ";
+                   messStr5=" ";
+                   printMess=1;
+                   fileDelete(fileNum);                   
+               }
+      } 
+   }
+}
+
+
+/**
+         П Р О Ц Е Д У Р А    О П Р Е Д Е Л Е Н И Я    Р А З М Е Р А    Ф А Й Л А    В    С Е К Т О Р А Х
+**/
+unsigned char fileSize(unsigned char filenum) {
+unsigned char i,s;
+   s=files[filenum];
+   if (s!=255) {
+     i=1; // если файл существует то размер минимум 1 сектор
+     while (VDISK[((unsigned int)s)*((unsigned int)E_ClusterSize)]!=255) { // пока не найдем последний сектор
+      s=VDISK[((unsigned int)s)*((unsigned int)E_ClusterSize)];            // увеличиваем количество секторов
+      i++;
+     }
+   
+   } else i=0; // файл не существует - его размер 0  
+return i;
+}

@@ -1,0 +1,3 @@
+void OpenModel(unsigned char filenum); // загрузка модели по номеру
+void menu_FILE_RESET(); // сброс модели в памяти
+void FILE_RESET(); 
